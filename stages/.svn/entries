@@ -1,0 +1,52 @@
+10
+
+dir
+171
+svn+ssh://Shiwen@blue.cdsc.ucla.edu/home/svn/cdsc/medical_pipeline/lung_pipeline_c_benchmark/stages
+svn+ssh://Shiwen@blue.cdsc.ucla.edu/home/svn/cdsc/medical_pipeline
+
+
+
+2015-01-28T07:29:34.954644Z
+162
+pouchet
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+96d90f4f-6e13-4f21-9c31-6972ffe26dde
+
+segmentationMask
+dir
+
+classification
+dir
+
+featureExtraction
+dir
+
+preselection
+dir
+
+segmentation
+dir
+
+levelscale
+dir
+
+rotation
+dir
+
+preparation
+dir
+

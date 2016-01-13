@@ -1,0 +1,247 @@
+/**
+ * classification_step.c: this file is part of the ALNSB project.
+ *
+ * ALNSB: the Adaptive Lung Nodule Screening Benchmark
+ *
+ * Copyright (C) 2014,2015 University of California Los Angeles
+ *
+ * This program can be redistributed and/or modified under the terms
+ * of the license specified in the LICENSE.txt file at the root of the
+ * project.
+ *
+ * Contact: Alex Bui <buia@mii.ucla.edu>
+ *
+ */
+/**
+ * Written by: Shiwen Shen, Prashant Rawat, Louis-Noel Pouchet and William Hsu
+ *
+ */
+#include <math.h>
+#include <stages/classification/classification_step.h>
+#include <utilities/file_io.h>
+#include <toolbox/bwconncomp.h>
+
+
+
+static
+float* compute_mean_mat (float* data, int sz_dim_1, int sz_dim_2, int dim_id)
+{
+  float* res = NULL;
+  int res_sz = 0;
+  if (dim_id == 1)
+    {
+      res = (float*) malloc (sizeof(float) * sz_dim_2);
+      res_sz = sz_dim_2;
+    }
+  else if (dim_id == 2)
+    {
+      res = (float*) malloc (sizeof(float) * sz_dim_1);
+      res_sz = sz_dim_1;
+    }
+  else
+    {
+      fprintf (stderr, "[ERROR][classification] Unsupported dimension id\n");
+      exit (1);
+    }
+  float (*im2D)[sz_dim_2] = (float (*)[sz_dim_2])(data);
+  int i, j;
+
+  for (i = 0; i < res_sz; ++i)
+    res[i] = 0;
+
+  for (i = 0; i < sz_dim_1; ++i)
+    for (j = 0; j < sz_dim_2; ++j)
+      {
+	int pos_res = dim_id == 1 ? j : i;
+	res[pos_res] += im2D[i][j];
+      }
+  if (dim_id == 1)
+    for (i = 0; i < res_sz; ++i)
+      res[i] /= (float)sz_dim_1;
+  else
+    for (i = 0; i < res_sz; ++i)
+      res[i] /= (float)sz_dim_2;
+
+  /* printf ("sz_dim_1=%d, res_sz=%d, sz_dim_2=%d\n", sz_dim_1, res_sz, sz_dim_2); */
+
+  /* for (i = 0; i < sz_dim_1; ++i) */
+  /*   debug_print_featureVector ("feat", data + i * sz_dim_2, sz_dim_2); */
+
+
+  return res;
+}
+
+static
+void debug_print_featureVector (char* msg, float* v, int nb_feat)
+{
+  int i;
+  printf ("%s:\n", msg);
+  for (i = 0; i < nb_feat; ++i)
+    printf ("%.2f ", v[i]);
+  printf ("\n");
+}
+
+
+void classification_cpu (s_alnsb_environment_t* __ALNSB_RESTRICT_PTR env,
+			 image3DReal* __ALNSB_RESTRICT_PTR inputPrep,
+			 image3DBin* __ALNSB_RESTRICT_PTR inputPresel,
+			 image3DReal* __ALNSB_RESTRICT_PTR inputFeats,
+			 image3DReal** __ALNSB_RESTRICT_PTR output)
+{
+  // Allocate output data.
+  *output = image3DReal_alloc (inputPrep->slices, inputPrep->rows, inputPrep->cols);
+  // 1D view of output data.
+  ALNSB_IMRealTo1D(*output, out_img);
+  // 1D view of input data.
+  ALNSB_IMBinTo1D(inputPresel, in_img);
+  ALNSB_IMRealTo1D(inputPrep, base_img);
+  ALNSB_IMRealTo1D(inputFeats, feats);
+
+  int debug = env->verbose_level;
+
+  // Classifier info.
+  int number_of_features = env->classifier_num_features;
+  size_t number_of_pos_samples;
+  size_t number_of_neg_samples;
+
+  int xc = inputPresel->rows;
+  int yc = inputPresel->cols;
+  int zc = inputPresel->slices;
+  unsigned int sz = xc * yc * zc;
+
+  unsigned int i, j;
+  int** comp_coordinates = NULL;
+  int* comp_sz = NULL;
+  int num_candidate_nodules = 0;
+
+  alnsb_bwconncomp_bin (in_img, zc, xc, yc,
+			&comp_coordinates, &comp_sz, &num_candidate_nodules,
+			NULL, 1);
+
+  int featureMask[number_of_features];
+  for (i = 0; i < number_of_features; ++i)
+    featureMask[i] = env->classifier_active_features[i];
+  if (debug == 42)
+    {
+      printf ("feature mask:\n");
+      for (i = 0; i < number_of_features; ++i)
+  	printf ("f%d=%d\n", i+1, featureMask[i]);
+      printf ("\n");
+    }
+
+  float xyzSpace[] = { env->scanner_pixel_spacing_x_mm,
+		       env->scanner_pixel_spacing_y_mm,
+		       env->scanner_slice_thickness_mm };
+  /// FIXME: ugly. Should be a global define. Sets an upper bound on
+  /// number of samples in any possible classifier matrix.
+  size_t max_nb_entries = 10000 * number_of_features;
+  float* selectedNegativeSamples =
+    alnsb_read_data_from_binary_file_nosz
+    (env->classifier_negative_featMat_filename, sizeof(float),
+     max_nb_entries, &number_of_neg_samples);
+  number_of_neg_samples /= number_of_features;
+  float* selectedPositiveSamples =
+    alnsb_read_data_from_binary_file_nosz
+    (env->classifier_positive_featMat_filename, sizeof(float),
+     max_nb_entries, &number_of_pos_samples);
+  number_of_pos_samples /= number_of_features;
+  float* meanFeature =
+    alnsb_read_data_from_binary_file
+    (env->classifier_meanFeat_filename, sizeof(float), number_of_features);
+  float* stdFeature =
+    alnsb_read_data_from_binary_file
+    (env->classifier_stdFeat_filename, sizeof(float), number_of_features);
+
+  if (debug > 2)
+    printf ("posSamplesMat: %d samples, negSamplesMat: %d samples\n",
+	    number_of_pos_samples, number_of_neg_samples);
+  
+  float* meanP = compute_mean_mat (selectedPositiveSamples,
+				   number_of_pos_samples,
+				   number_of_features, 1);
+  float* meanN = compute_mean_mat (selectedNegativeSamples,
+				   number_of_neg_samples,
+				   number_of_features, 1);
+
+  if (debug > 2)
+    {
+      debug_print_featureVector ("meanP", meanP, number_of_features);
+      debug_print_featureVector ("meanN", meanN, number_of_features);
+      debug_print_featureVector ("meanFeat", meanFeature, number_of_features);
+      debug_print_featureVector ("stdFeat", stdFeature, number_of_features);
+    }
+
+
+  for (i = 0; i < number_of_features; ++i)
+    {
+      if (featureMask[i] == 0)
+	{
+	  meanP[i] = 0;
+	  meanN[i] = 0;
+	  meanFeature[i] = 0;
+	  stdFeature[i] = 0;
+	}
+    }
+
+  int noduleNum = 0;
+  float featVect[number_of_features];
+  unsigned int offset = 0;
+  for (i = 0; i < num_candidate_nodules; ++i)
+    {
+      if (debug > 1)
+	printf ("classify nodule #%d\n", i);
+      for (j = 0; j < number_of_features; ++j)
+	if (featureMask[j] != 0)
+	  featVect[j] = feats[j + offset];
+	else
+	  featVect[j] = 0;
+      if (debug > 2)
+	debug_print_featureVector ("featVec", featVect, number_of_features);
+      for (j = 0; j < number_of_features; ++j)
+	if (featureMask[j] != 0)
+	  featVect[j] = (featVect[j] - meanFeature[j]) / stdFeature[j];
+      if (debug > 2)
+	debug_print_featureVector ("featVecNorm", featVect, number_of_features);
+      float temp1 = 0;
+      float temp2 = 0;
+      for (j = 0; j < number_of_features; ++j)
+	if (featureMask[j] != 0)
+	  {
+	    temp1 += pow(featVect[j] - meanP[j], 2);
+	    temp2 += pow(featVect[j] - meanN[j], 2);
+	  }
+      if (debug > 2){
+        // debug_print_featureVector ("meanP_after_mask", meanP, number_of_features);
+        // debug_print_featureVector ("meanN_after_mask", meanN, number_of_features);
+        printf ("distance to pos: %f, distance to neg: %f\n", temp1, temp2);
+      }
+  
+      int z_plane =
+	comp_coordinates[i][0] / (xc * yc);
+
+      int start_slice=
+   comp_coordinates[i][0] / (xc * yc)+1;
+      int end_slice=
+    comp_coordinates[i][comp_sz[i]-1] / (xc * yc)+1;
+      if (temp1 < temp2)
+	{
+	  for (j = 0; j < comp_sz[i]; ++j)
+	    out_img[comp_coordinates[i][j]] = base_img[comp_coordinates[i][j]];
+	  ++noduleNum;
+	  float nodule_volume = comp_sz[i] * xyzSpace[0] * xyzSpace[1] *
+	    xyzSpace[2];
+	  if (debug)
+	    printf ("[INFO] Suspicous nodule #%d: slice=%d volume=%.2f\n", noduleNum, z_plane, nodule_volume);
+    
+//  printf("[SHiwen Info] detected from %d to %d\n", start_slice, end_slice);
+	}
+
+      offset += number_of_features;
+    }
+  for (i = 0; i < num_candidate_nodules; ++i)
+    free (comp_coordinates[i]);
+  free (comp_coordinates);
+  free (comp_sz);
+
+  printf ("[INFO] Retained %d nodules out of %d candidates\n", noduleNum, num_candidate_nodules);
+}
